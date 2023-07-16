@@ -1,0 +1,280 @@
+﻿@page "/"
+@using OBDReader.Services
+@using System.Collections.ObjectModel
+@using System.Text
+@using Plugin.BLE.Abstractions
+@inject BluetoothLeService BluetoothLeService
+
+<h1>Hello, world!</h1>
+
+Welcome to your new app.
+
+<MudButton OnClick="ScanDevicesAsync">Scan for Devices</MudButton>
+
+<MudButton OnClick="ReadMilesAsync">Read Miles</MudButton>
+
+<MudSimpleTable>
+    <thead>
+    <tr>
+        <th>Name</th>
+        <th>ID</th>
+    </tr>
+    </thead>
+    <tbody>
+    @foreach(var deviceCandidate in DeviceCandidates)
+    {
+        <tr @onclick="() => OnClick(deviceCandidate)">
+            <td>@deviceCandidate.Name</td>
+            <td>@deviceCandidate.Id</td>
+        </tr>
+    }
+    </tbody>
+</MudSimpleTable>
+
+<MudText>@result</MudText>
+
+@code{
+
+    bool IsScanning { get; set; } = false;
+    bool IsBusy { get; set; } = false;
+    string result = string.Empty;
+    public ObservableCollection<DeviceCandidate> DeviceCandidates { get; } = new();
+    public IService ObdService { get; private set; }
+    public ICharacteristic ObdCharacteristic { get; private set; }
+    
+    async Task OnClick(DeviceCandidate deviceCandidate)
+    {
+        Debug.WriteLine($"Clicked {deviceCandidate.Name}");
+        BluetoothLeService.NewDeviceCandidateFromHomePage = deviceCandidate;
+        await ConnectToDeviceCandidateAsync();
+    }
+    
+    async Task ScanDevicesAsync()
+    {
+        if (IsScanning)
+        {
+            return;
+        }
+         
+        if (!BluetoothLeService.BluetoothLE.IsAvailable)
+        {
+            Debug.WriteLine($"Bluetooth is missing.");
+            await Shell.Current.DisplayAlert($"Bluetooth", $"Bluetooth is missing.", "OK");
+            return;
+        }
+
+#if ANDROID
+        PermissionStatus permissionStatus = await BluetoothLeService.CheckBluetoothPermissions();
+        if (permissionStatus != PermissionStatus.Granted)
+        {
+            permissionStatus = await BluetoothLeService.RequestBluetoothPermissions();
+            if (permissionStatus != PermissionStatus.Granted)
+            {
+                await Shell.Current.DisplayAlert($"Bluetooth LE permissions", $"Bluetooth LE permissions are not granted.", "OK");
+                return;
+            }
+        }
+#elif IOS
+#elif WINDOWS
+#endif
+
+        try
+        {
+            if (!BluetoothLeService.BluetoothLE.IsOn)
+            {
+                await Shell.Current.DisplayAlert($"Bluetooth is not on", $"Please turn Bluetooth on and try again.", "OK");
+                return;
+            }
+
+            IsScanning = true;
+
+            List<DeviceCandidate> deviceCandidates = await BluetoothLeService.ScanForDevicesAsync();
+
+            if (deviceCandidates.Count == 0)
+            {
+                await BluetoothLeService.ShowToastAsync($"Unable to find nearby Bluetooth LE devices. Try again.");
+            }
+
+            if (DeviceCandidates.Count > 0)
+            {
+                DeviceCandidates.Clear();
+            }
+
+            foreach (var deviceCandidate in deviceCandidates)
+            {
+                DeviceCandidates.Add(deviceCandidate);
+            }
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Unable to get nearby Bluetooth LE devices: {ex.Message}");
+            await Shell.Current.DisplayAlert($"Unable to get nearby Bluetooth LE devices", $"{ex.Message}.", "OK");
+        }
+        finally
+        {
+            IsScanning = false;
+        }
+    }
+    
+    private async Task ConnectToDeviceCandidateAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        if (BluetoothLeService.NewDeviceCandidateFromHomePage.Id.Equals(Guid.Empty))
+        {
+            #region read device id from storage
+            var device_name = await SecureStorage.Default.GetAsync("device_name");
+            var device_id = await SecureStorage.Default.GetAsync("device_id");
+            if (!string.IsNullOrEmpty(device_id))
+            {
+                BluetoothLeService.NewDeviceCandidateFromHomePage.Name = device_name;
+                BluetoothLeService.NewDeviceCandidateFromHomePage.Id = Guid.Parse(device_id);
+            }
+            #endregion read device id from storage
+            else
+            {
+                await BluetoothLeService.ShowToastAsync($"Select a Bluetooth LE device first. Try again.");
+                return;
+            }
+        }
+
+        if (!BluetoothLeService.BluetoothLE.IsOn)
+        {
+            await Shell.Current.DisplayAlert($"Bluetooth is not on", $"Please turn Bluetooth on and try again.", "OK");
+            return;
+        }
+
+        if (BluetoothLeService.Adapter.IsScanning)
+        {
+            await BluetoothLeService.ShowToastAsync($"Bluetooth adapter is scanning. Try again.");
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+
+            if (BluetoothLeService.Device is {State: DeviceState.Connected })
+            {
+                if (BluetoothLeService.Device.Id.Equals(BluetoothLeService.NewDeviceCandidateFromHomePage.Id))
+                {
+                    await BluetoothLeService.ShowToastAsync($"{BluetoothLeService.Device.Name} is already connected.");
+                    if (ObdService != null) return;
+                    ObdService = await BluetoothLeService.Device.GetServiceAsync(ObdUuids.ObdServiceUuid);
+                    if (ObdService == null) return;
+                    ObdCharacteristic = await ObdService.GetCharacteristicAsync(ObdUuids.ObdCharacteristicUuid);
+                    if (ObdCharacteristic == null) return;
+                    if (!ObdCharacteristic.CanUpdate || !ObdCharacteristic.CanRead || !ObdCharacteristic.CanWrite) return;
+                    await BluetoothLeService.ShowToastAsync($"{BluetoothLeService.Device.Name} is ready to read.");
+                    return;
+                }
+
+                if (BluetoothLeService.NewDeviceCandidateFromHomePage != null)
+                {
+    #region another device
+                    if (!BluetoothLeService.Device.Id.Equals(BluetoothLeService.NewDeviceCandidateFromHomePage.Id))
+                    {
+    //await DisconnectFromDeviceAsync();
+                        await BluetoothLeService.ShowToastAsync($"{BluetoothLeService.Device.Name} has been disconnected.");
+                    }
+    #endregion another device
+                }
+            }
+
+            BluetoothLeService.Device = await BluetoothLeService.Adapter.ConnectToKnownDeviceAsync(BluetoothLeService.NewDeviceCandidateFromHomePage.Id);
+
+            if (BluetoothLeService.Device.State == DeviceState.Connected)
+            {
+                ObdService = await BluetoothLeService.Device.GetServiceAsync(ObdUuids.ObdServiceUuid);
+                if (ObdService != null)
+                {
+                    ObdCharacteristic = await ObdService.GetCharacteristicAsync(ObdUuids.ObdCharacteristicUuid);
+                    if (ObdCharacteristic != null)
+                    {
+                        if (ObdCharacteristic.CanUpdate && ObdCharacteristic.CanRead && ObdCharacteristic.CanWrite)
+                        {
+                
+                            #region save device id to storage
+                            await SecureStorage.Default.SetAsync("device_name", $"{BluetoothLeService.Device.Name}");
+                            await SecureStorage.Default.SetAsync("device_id", $"{BluetoothLeService.Device.Id}");
+                            #endregion save device id to storage
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Unable to connect to {BluetoothLeService.NewDeviceCandidateFromHomePage.Name} {BluetoothLeService.NewDeviceCandidateFromHomePage.Id}: {ex.Message}.");
+            await Shell.Current.DisplayAlert($"{BluetoothLeService.NewDeviceCandidateFromHomePage.Name}", $"Unable to connect to {BluetoothLeService.NewDeviceCandidateFromHomePage.Name}.", "OK");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ReadMilesAsync()
+    {
+        if (ObdCharacteristic == null)
+        {
+            await ConnectToDeviceCandidateAsync();
+        }
+
+        await new EchoOffCommand().Run(ObdCharacteristic);
+        await new LineFeedOffCommand().Run(ObdCharacteristic);
+        await new TimeoutCommand(125).Run(ObdCharacteristic);
+        await new SelectProtocolCommand((char)ObdProtocols.AUTO).Run(ObdCharacteristic);
+        await new SetHeadersCommand("7E1").Run(ObdCharacteristic);
+        await new HeadersOffCommand().Run(ObdCharacteristic);
+        var distanceCommand = new DistanceSinceLastCcCommand
+        {
+            UseImperialUnits = true
+        };
+        await distanceCommand.Run(ObdCharacteristic);
+        var distance = distanceCommand.GetFormattedResult();
+        try
+        {
+            await BluetoothLeService.ShowToastAsync($"Distance: {distance}");
+            Debug.WriteLine($"Distance: {distance}");
+        } catch (Exception ex)
+        {
+            Debug.WriteLine($"Unable to show toast: {ex.Message}");
+            result = distance;
+        }
+        
+        
+    // ObdCharacteristic.ValueUpdated += ObdCharacteristic_ValueUpdated;
+    // await ObdCharacteristic.StartUpdatesAsync();
+    }
+    
+    // private async void ObdCharacteristic_ValueUpdated(object sender, CharacteristicUpdatedEventArgs e)
+    // {
+    //     var bytes = e.Characteristic.Value;
+    //     var hex = BitConverter.ToString(bytes);
+    //     Debug.WriteLine($"ObdCharacteristic_ValueUpdated: {hex}");
+    //     var ascii = HexToAscii(hex);
+    //     Debug.WriteLine($"ObdCharacteristic_ValueUpdated String: {ascii}");
+    //     //await ObdCharacteristic.StopUpdatesAsync();
+    // //await BluetoothLeService.ShowToastAsync($"Reply: {ascii}");
+    // }
+
+    private string HexToAscii(string hexString)
+    {
+        // Remove dashes and convert to bytes
+        var bytes = Enumerable.Range(0, hexString.Length)
+                                .Where(x => x % 3 == 0)
+                                .Select(x => Convert.ToByte(hexString.Substring(x, 2), 16))
+                                .ToArray();
+    
+        // Convert bytes to ASCII characters
+        var asciiString = System.Text.Encoding.ASCII.GetString(bytes);
+    
+        return asciiString;
+    }
+    
+}

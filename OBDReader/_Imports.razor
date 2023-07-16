@@ -1,0 +1,18 @@
+﻿@using System.Net.Http
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.Components.Routing
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.AspNetCore.Components.Web.Virtualization
+@using Microsoft.JSInterop
+@using OBDReader
+@using OBDReader.Shared
+@using System.Diagnostics;
+@using CommunityToolkit.Maui.Core;
+@using OBDReader.Data;
+@using OBDReader.Uuids;
+@using Plugin.BLE;
+@using Plugin.BLE.Abstractions.Contracts;
+@using Plugin.BLE.Abstractions.EventArgs;
+@using IAdapter = Plugin.BLE.Abstractions.Contracts.IAdapter;
+@using Toast = CommunityToolkit.Maui.Alerts.Toast;
+@using MudBlazor;
